@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Photoshop‑Lite</title>
+  <!-- Minimal reset and mobile-friendly layout -->
+  <style>
+    :root{
+      --bg:#0b0c10;--panel:#14161b;--muted:#1b1e25;--text:#e6e6e6;--accent:#6ee7ff;--accent2:#a78bfa;--danger:#ef4444;
+      --toolbar:72px;--sidebar:280px;--topbar:56px;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+    button,input,select{font:inherit}
+    .app{display:grid;grid-template-columns:var(--toolbar) 1fr var(--sidebar);grid-template-rows:var(--topbar) 1fr;gap:0}
+    .topbar{grid-column:1/4;grid-row:1/2;display:flex;align-items:center;justify-content:space-between;background:var(--panel);border-bottom:1px solid #222;padding:0 8px;}
+    .left{grid-column:1/2;grid-row:2/3;background:var(--panel);border-right:1px solid #222;display:flex;flex-direction:column;overflow:auto}
+    .center{grid-column:2/3;grid-row:2/3;position:relative;overflow:hidden;background:#0f1218}
+    .right{grid-column:3/4;grid-row:2/3;background:var(--panel);border-left:1px solid #222;display:flex;flex-direction:column;min-width:0}
+
+    .toolbar{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:8px}
+    .tool{display:flex;align-items:center;justify-content:center;height:48px;background:var(--muted);border:1px solid #23262f;border-radius:10px;cursor:pointer}
+    .tool.active{outline:2px solid var(--accent)}
+    .tool:hover{background:#232733}
+
+    .stage-wrap{position:absolute;inset:0;overflow:auto}
+    .stage{position:relative;margin:auto;background:#111;border:1px dashed #2d323f;touch-action:none}
+    canvas#stage{display:block;background:transparent}
+    .checkerboard{position:absolute;inset:0;background:linear-gradient(45deg,#1a1d26 25%,transparent 25%),linear-gradient(-45deg,#1a1d26 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#1a1d26 75%),linear-gradient(-45deg,transparent 75%,#1a1d26 75%);background-size:20px 20px;background-position:0 0,0 10px,10px -10px,-10px 0}
+
+    .section{padding:10px;border-bottom:1px solid #222}
+    .section h3{margin:0 0 8px 0;font-size:14px;opacity:.9}
+    .layers{flex:1 1 auto;overflow:auto}
+    .layer{display:flex;align-items:center;gap:6px;background:var(--muted);border:1px solid #2a2e39;border-radius:10px;padding:6px;margin-bottom:6px}
+    .layer input[type="checkbox"]{transform:scale(1.1)}
+    .layer .name{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .layer .btn{background:#222a3a;border:1px solid #384156;color:#eaeaea;border-radius:8px;padding:4px 6px;cursor:pointer}
+    .layer .btn:hover{filter:brightness(1.1)}
+    .drag{cursor:grab}
+
+    .row{display:flex;align-items:center;gap:8px}
+    .row > *{flex:1}
+    .slider{width:100%}
+    .pill{background:#1c2030;border:1px solid #2d3755;border-radius:999px;padding:4px 10px}
+    .kbd{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background:#0f1320;border:1px solid #2a3556;border-radius:6px;padding:2px 6px}
+
+    /* Mobile/iPhone friendly – default stage to iPhone 13 logical size */
+    .stage{width:390px;height:844px}
+
+    /* Crop overlay */
+    .crop-rect{position:absolute;border:2px dashed var(--accent2);pointer-events:none}
+
+    .hidden{display:none}
+    a.btn,button.btn{background:#22304a;border:1px solid #3a4d74;color:#e6f1ff;border-radius:10px;padding:8px 12px;cursor:pointer}
+    a.btn:hover,button.btn:hover{filter:brightness(1.08)}
+    .danger{background:#3a1e26;border-color:#7a2b38}
+  </style>
+  <!-- External libs (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
+</head>
+<body>
+  <div class="app">
+    <div class="topbar">
+      <div class="row" style="gap:6px;flex:1;">
+        <button class="btn" id="newDoc">New</button>
+        <input type="file" id="fileInput" accept="image/*" multiple class="hidden" />
+        <button class="btn" id="openBtn">Open Images</button>
+        <button class="btn" id="exportBtn">Export PNG</button>
+        <button class="btn" id="undoBtn" title="Undo (Cmd/Ctrl+Z)">Undo</button>
+        <button class="btn" id="redoBtn" title="Redo (Shift+Cmd/Ctrl+Z)">Redo</button>
+      </div>
+      <div class="row" style="gap:6px;">
+        <button class="btn" id="bgRemoveBtn" title="AI Remove Background">Remove BG</button>
+        <select id="modelSelect" class="pill" title="Segmentation model source">
+          <option value="https://huggingface.co/onnx-community/u2net/resolve/main/u2net.onnx?download=true">U2Net (HuggingFace CDN)</option>
+          <option value="https://cdn.jsdelivr.net/gh/xuebinqin/U-2-Net/u2net.onnx">U2Net (jsDelivr mirror)</option>
+        </select>
+      </div>
+    </div>
+
+    <aside class="left">
+      <div class="toolbar">
+        <div class="tool active" data-tool="move" title="Move (V)">✥</div>
+        <div class="tool" data-tool="brush" title="Brush (B)">🖌️</div>
+        <div class="tool" data-tool="eraser" title="Eraser (E)">🩹</div>
+        <div class="tool" data-tool="fill" title="Fill (G)">🪣</div>
+        <div class="tool" data-tool="text" title="Text (T)">Tt</div>
+        <div class="tool" data-tool="crop" title="Crop (C)">✂️</div>
+        <div class="tool" data-tool="zoom" title="Zoom (Z)">🔍</div>
+        <div class="tool" data-tool="mask" title="Mask Refine (R)">🎭</div>
+      </div>
+      <div class="section">
+        <h3>Brush / Eraser</h3>
+        <div class="row"><label>Size</label><input id="brushSize" type="range" min="1" max="80" value="16" class="slider"/></div>
+        <div class="row"><label>Opacity</label><input id="brushOpacity" type="range" min="0.05" max="1" step="0.05" value="1" class="slider"/></div>
+        <div class="row"><label>Color</label><input id="brushColor" type="color" value="#ffffff"/></div>
+      </div>
+      <div class="section">
+        <h3>Text</h3>
+        <div class="row"><input id="textInput" placeholder="Type text…"/></div>
+        <div class="row"><label>Font</label>
+          <select id="fontSelect">
+            <option value="Arial">Arial</option>
+            <option value="Helvetica">Helvetica</option>
+            <option value="Times New Roman">Times New Roman</option>
+            <option value="Courier New">Courier New</option>
+            <option value="Georgia">Georgia</option>
+            <option value="Trebuchet MS">Trebuchet MS</option>
+            <option value="Verdana">Verdana</option>
+            <option value="Monaco">Monaco</option>
+          </select>
+        </div>
+        <div class="row"><label>Size</label><input id="fontSize" type="range" min="8" max="128" value="36" class="slider"/></div>
+        <div class="row"><label>Weight</label>
+          <select id="fontWeight">
+            <option>normal</option>
+            <option>bold</option>
+            <option>lighter</option>
+            <option>600</option>
+            <option>700</option>
+          </select>
+        </div>
+        <div class="row"><label>Color</label><input id="textColor" type="color" value="#ffffff"/></div>
+      </div>
+    </aside>
+
+    <main class="center">
+      <div class="stage-wrap" id="stageWrap">
+        <div class="stage" id="stageContainer">
+          <div class="checkerboard"></div>
+          <canvas id="stage" width="390" height="844"></canvas>
+          <div id="cropRect" class="crop-rect hidden"></div>
+        </div>
+      </div>
+    </main>
+
+    <aside class="right">
+      <div class="section">
+        <h3>Document</h3>
+        <div class="row">
+          <label>W</label><input id="docW" type="number" value="390"/>
+          <label>H</label><input id="docH" type="number" value="844"/>
+          <button class="btn" id="resizeDoc">Resize</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <h3>Adjustments (Layer)</h3>
+        <div class="row"><label>Brightness</label><input id="adjBrightness" type="range" min="-100" max="100" value="0" class="slider"/></div>
+        <div class="row"><label>Contrast</label><input id="adjContrast" type="range" min="-100" max="100" value="0" class="slider"/></div>
+        <div class="row"><label>Saturation</label><input id="adjSaturation" type="range" min="-100" max="100" value="0" class="slider"/></div>
+        <div class="row"><label>Hue</label><input id="adjHue" type="range" min="-180" max="180" value="0" class="slider"/></div>
+        <div class="row"><label>Opacity</label><input id="layerOpacity" type="range" min="0" max="1" step="0.01" value="1" class="slider"/></div>
+        <div class="row"><label>Blend</label>
+          <select id="blendMode">
+            <option>normal</option>
+            <option>multiply</option>
+            <option>screen</option>
+            <option>overlay</option>
+            <option>darken</option>
+            <option>lighten</option>
+            <option>color-burn</option>
+            <option>color-dodge</option>
+            <option>hard-light</option>
+            <option>soft-light</option>
+            <option>difference</option>
+            <option>exclusion</option>
+            <option>hue</option>
+            <option>saturation</option>
+            <option>color</option>
+            <option>luminosity</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="section">
+        <h3>Layers</h3>
+        <div class="row" style="gap:6px;">
+          <button class="btn" id="addPaintLayer">+ Paint Layer</button>
+          <button class="btn" id="addTextLayer">+ Text Layer</button>
+          <button class="btn" id="uploadLayer">+ Image</button>
+        </div>
+        <div id="layers" class="layers"></div>
+      </div>
+
+      <div class="section">
+        <h3>Crop</h3>
+        <div class="row" style="gap:6px;">
+          <button class="btn" id="applyCrop">Apply Crop</button>
+          <button class="btn danger" id="cancelCrop">Cancel</button>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script>
+    // -----------------------------
+    // Core state
+    // -----------------------------
+    const stage = document.getElementById('stage');
+    const ctx = stage.getContext('2d');
+    const stageContainer = document.getElementById('stageContainer');
+    const cropRect = document.getElementById('cropRect');
+
+    const tools = Array.from(document.querySelectorAll('.tool'));
+    let currentTool = 'move';
+
+    const state = {
+      layers: [], // {id,type:'image'|'paint'|'text', name, visible, opacity, blend, x,y, scale, rot, canvas, maskCanvas, adjustments, textProps}
+      activeLayerId: null,
+      zoom: 1,
+      offsetX: 0,
+      offsetY: 0,
+      history: [],
+      future: [],
+      cropping: null, // {x,y,w,h} in document space
+    };
+
+    const genId = () => 'L'+Math.random().toString(36).slice(2,9);
+
+    function pushHistory(){
+      const snapshot = JSON.stringify(serialize());
+      state.history.push(snapshot);
+      state.future.length = 0;
+    }
+    function undo(){ if(!state.history.length) return; const snap = state.history.pop(); state.future.push(JSON.stringify(serialize())); deserialize(JSON.parse(snap)); render(); }
+    function redo(){ if(!state.future.length) return; const snap = state.future.pop(); state.history.push(JSON.stringify(serialize())); deserialize(JSON.parse(snap)); render(); }
+
+    // -----------------------------
+    // Layer helpers
+    // -----------------------------
+    function createBaseLayer(type, name){
+      const id = genId();
+      const layer = { id, type, name: name||type, visible:true, opacity:1, blend:'normal', x:0,y:0, scale:1, rot:0, adjustments:{b:0,c:0,s:0,h:0}, canvas:null, maskCanvas:null, textProps:null };
+      if(type==='paint'){ layer.canvas = document.createElement('canvas'); layer.canvas.width=stage.width; layer.canvas.height=stage.height; }
+      if(type==='text'){ layer.textProps={ text:'Text', font:'Arial', size:36, weight:'normal', color:'#ffffff' }; layer.canvas=document.createElement('canvas'); layer.canvas.width=stage.width; layer.canvas.height=stage.height; drawTextLayer(layer); }
+      return layer;
+    }
+    function addLayer(layer){ state.layers.push(layer); state.activeLayerId = layer.id; refreshLayersUI(); pushHistory(); render(); }
+    function deleteLayer(id){ const i=state.layers.findIndex(l=>l.id===id); if(i>=0){ state.layers.splice(i,1); if(state.activeLayerId===id){ state.activeLayerId = state.layers[i-1]?.id || state.layers[0]?.id || null; } refreshLayersUI(); pushHistory(); render(); } }
+    function moveLayer(id, dir){ const i=state.layers.findIndex(l=>l.id===id); if(i<0) return; const j = i+dir; if(j<0||j>=state.layers.length) return; const [l]=state.layers.splice(i,1); state.layers.splice(j,0,l); refreshLayersUI(); pushHistory(); render(); }
+    function getActive(){ return state.layers.find(l=>l.id===state.activeLayerId) || null; }
+
+    // -----------------------------
+    // Serialization
+    // -----------------------------
+    function serialize(){
+      return {
+        w: stage.width, h: stage.height,
+        layers: state.layers.map(l=>({
+          ...l,
+          // replace canvases with data URLs
+          canvas: l.canvas ? l.canvas.toDataURL() : null,
+          maskCanvas: l.maskCanvas ? l.maskCanvas.toDataURL() : null,
+        }))
+      }
+    }
+    function deserialize(data){
+      stage.width = data.w; stage.height = data.h; document.getElementById('docW').value=data.w; document.getElementById('docH').value=data.h; stageContainer.style.width=data.w+'px'; stageContainer.style.height=data.h+'px';
+      state.layers = data.layers.map(L=>{
+        const l = {...L};
+        if(L.canvas){ const img=new Image(); img.src=L.canvas; const c=document.createElement('canvas'); c.width=stage.width; c.height=stage.height; img.onload=()=>{ c.getContext('2d').drawImage(img,0,0); render(); }; l.canvas=c; }
+        if(L.maskCanvas){ const img=new Image(); img.src=L.maskCanvas; const c=document.createElement('canvas'); c.width=stage.width; c.height=stage.height; img.onload=()=>{ c.getContext('2d').drawImage(img,0,0); render(); }; l.maskCanvas=c; }
+        return l;
+      });
+      state.activeLayerId = state.layers[ state.layers.length-1 ]?.id || null;
+      refreshLayersUI();
+    }
+
+    // -----------------------------
+    // Rendering
+    // -----------------------------
+    function composeFilter(adj){
+      const b = adj.b; // -100..100
+      const c = adj.c; // -100..100
+      const s = adj.s; // -100..100
+      const h = adj.h; // -180..180
+      return `brightness(${100+b}%) contrast(${100+c}%) saturate(${100+s}%) hue-rotate(${h}deg)`;
+    }
+
+    function render(){
+      const {zoom, offsetX, offsetY} = state;
+      ctx.setTransform(1,0,0,1,0,0);
+      ctx.clearRect(0,0,stage.width,stage.height);
+      // Composite each visible layer
+      state.layers.forEach(layer=>{
+        if(!layer.visible) return;
+        ctx.save();
+        ctx.globalAlpha = layer.opacity;
+        ctx.globalCompositeOperation = layer.blend;
+        ctx.filter = composeFilter(layer.adjustments);
+        ctx.translate(layer.x, layer.y);
+        ctx.scale(layer.scale, layer.scale);
+        ctx.rotate(layer.rot*Math.PI/180);
+
+        if(layer.type==='image' || layer.type==='paint' || layer.type==='text'){
+          if(layer.canvas){
+            if(layer.maskCanvas){
+              // Apply mask by drawing mask to temp and using destination-in
+              const temp = document.createElement('canvas'); temp.width=layer.canvas.width; temp.height=layer.canvas.height; const tctx=temp.getContext('2d');
+              tctx.drawImage(layer.canvas,0,0);
+              tctx.globalCompositeOperation='destination-in';
+              tctx.drawImage(layer.maskCanvas,0,0);
+              ctx.drawImage(temp,0,0);
+            } else {
+              ctx.drawImage(layer.canvas,0,0);
+            }
+          }
+        }
+        ctx.restore();
+      });
+      ctx.setTransform(1,0,0,1,0,0);
+    }
+
+    // -----------------------------
+    // UI: Layers panel
+    // -----------------------------
+    const layersEl = document.getElementById('layers');
+    function refreshLayersUI(){
+      layersEl.innerHTML='';
+      // show top-most first
+      [...state.layers].reverse().forEach(layer=>{
+        const row = document.createElement('div'); row.className='layer drag'; row.dataset.id = layer.id;
+        const vis = document.createElement('input'); vis.type='checkbox'; vis.checked=layer.visible; vis.addEventListener('change',()=>{ layer.visible=vis.checked; pushHistory(); render(); });
+        const name = document.createElement('div'); name.className='name'; name.textContent = layer.name + ` (${layer.type})`;
+        const sel = document.createElement('button'); sel.className='btn'; sel.textContent='Select'; sel.onclick=()=>{ state.activeLayerId=layer.id; selectLayerUI(layer.id); syncInspector(); };
+        const up = document.createElement('button'); up.className='btn'; up.textContent='Up'; up.onclick=()=>moveLayer(layer.id, +1);
+        const down = document.createElement('button'); down.className='btn'; down.textContent='Down'; down.onclick=()=>moveLayer(layer.id, -1);
+        const del = document.createElement('button'); del.className='btn'; del.textContent='Del'; del.onclick=()=>deleteLayer(layer.id);
+        row.append(vis,name,sel,up,down,del);
+        layersEl.appendChild(row);
+      });
+      selectLayerUI(state.activeLayerId);
+    }
+    function selectLayerUI(id){
+      state.activeLayerId = id;
+      document.querySelectorAll('.layer').forEach(el=>{
+        el.style.outline = (el.dataset.id===id)? '2px solid var(--accent)' : 'none';
+      });
+    }
+
+    // Sync inspector sliders with active layer
+    function syncInspector(){
+      const L = getActive(); if(!L) return;
+      document.getElementById('layerOpacity').value = L.opacity;
+      document.getElementById('blendMode').value = L.blend;
+      document.getElementById('adjBrightness').value = L.adjustments.b;
+      document.getElementById('adjContrast').value = L.adjustments.c;
+      document.getElementById('adjSaturation').value = L.adjustments.s;
+      document.getElementById('adjHue').value = L.adjustments.h;
+    }
+
+    // -----------------------------
+    // Tool switching
+    // -----------------------------
+    tools.forEach(btn=>btn.addEventListener('click',()=>{
+      tools.forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      currentTool = btn.dataset.tool;
+    }));
+
+    // Keyboard shortcuts
+    window.addEventListener('keydown', (e)=>{
+      if(e.target.tagName==='INPUT' || e.target.tagName==='SELECT' || e.target.isContentEditable) return;
+      const k = e.key.toLowerCase();
+      if((e.metaKey||e.ctrlKey) && !e.shiftKey && k==='z'){ e.preventDefault(); undo(); return; }
+      if((e.metaKey||e.ctrlKey) && e.shiftKey && k==='z'){ e.preventDefault(); redo(); return; }
+      const map={v:'move',b:'brush',e:'eraser',g:'fill',t:'text',c:'crop',z:'zoom',r:'mask'};
+      if(map[k]){ document.querySelector(`.tool[data-tool="${map[k]}"]`).click(); }
+    });
+
+    // -----------------------------
+    // Loading images as layers
+    // -----------------------------
+    document.getElementById('openBtn').onclick=()=>document.getElementById('fileInput').click();
+    document.getElementById('uploadLayer').onclick=()=>document.getElementById('fileInput').click();
+    document.getElementById('fileInput').addEventListener('change', async (e)=>{
+      for(const file of e.target.files){
+        const img = new Image(); img.src = URL.createObjectURL(file);
+        await img.decode();
+        const layer = createImageLayerFromImage(img, file.name);
+        addLayer(layer);
+      }
+      e.target.value='';
+    });
+
+    function createImageLayerFromImage(img, name){
+      const layer = createBaseLayer('image', name||'Image');
+      layer.canvas = document.createElement('canvas'); layer.canvas.width=stage.width; layer.canvas.height=stage.height; const lctx=layer.canvas.getContext('2d');
+      // Fit image to stage
+      const scale = Math.min(stage.width/img.width, stage.height/img.height);
+      const w = img.width*scale; const h = img.height*scale; const x=(stage.width-w)/2; const y=(stage.height-h)/2;
+      lctx.drawImage(img, x, y, w, h);
+      return layer;
+    }
+
+    // -----------------------------
+    // Painting & erasing & masking
+    // -----------------------------
+    let painting=false; let lastX=0,lastY=0;
+    stage.addEventListener('pointerdown', (e)=>{
+      const pos = getDocPos(e);
+      const L = getActive();
+      if(currentTool==='brush' || currentTool==='eraser' || currentTool==='mask'){
+        if(!L) return;
+        if(!L.canvas){ L.canvas=document.createElement('canvas'); L.canvas.width=stage.width; L.canvas.height=stage.height; }
+        if(currentTool==='mask' && !L.maskCanvas){ L.maskCanvas=document.createElement('canvas'); L.maskCanvas.width=stage.width; L.maskCanvas.height=stage.height; const m=L.maskCanvas.getContext('2d'); m.fillStyle='#fff'; m.fillRect(0,0,stage.width,stage.height); }
+        painting=true; lastX=pos.x; lastY=pos.y; drawStroke(L, pos.x, pos.y, true);
+      } else if(currentTool==='text'){
+        addTextAt(pos.x,pos.y);
+      } else if(currentTool==='move'){
+        draggingLayerStart(e);
+      } else if(currentTool==='fill'){
+        floodFillAt(pos.x, pos.y);
+      } else if(currentTool==='crop'){
+        startCrop(pos.x,pos.y);
+      } else if(currentTool==='zoom'){
+        zoomAt(e, pos);
+      }
+    });
+    stage.addEventListener('pointermove', (e)=>{
+      const pos = getDocPos(e);
+      if(painting){ const L=getActive(); drawStroke(L, pos.x, pos.y, false); }
+      if(dragging){ draggingMove(e); }
+      if(state.cropping && cropDrag){ updateCrop(pos.x,pos.y); }
+    });
+    window.addEventListener('pointerup', ()=>{ painting=false; if(dragging){ dragging=false; pushHistory(); } if(cropDrag){ cropDrag=false; }});
+
+    function drawStroke(L, x, y, first){
+      const size = parseFloat(document.getElementById('brushSize').value);
+      const alpha = parseFloat(document.getElementById('brushOpacity').value);
+      const color = document.getElementById('brushColor').value;
+      const c = (currentTool==='mask') ? (L.maskCanvas.getContext('2d')) : L.canvas.getContext('2d');
+      c.globalAlpha = alpha;
+      c.lineCap='round'; c.lineJoin='round'; c.lineWidth=size;
+      if(currentTool==='eraser'){
+        c.globalCompositeOperation='destination-out';
+        c.strokeStyle = 'rgba(0,0,0,1)';
+      } else if(currentTool==='mask'){
+        c.globalCompositeOperation='source-over';
+        // Mask refine: left button paints transparent (erase), right button restores
+        // Using primary color as erase (black), secondary as white when Shift is held
+        const erase = !window.event.shiftKey;
+        c.strokeStyle = erase ? '#000000' : '#ffffff';
+      } else {
+        c.globalCompositeOperation='source-over';
+        c.strokeStyle = color;
+      }
+      c.beginPath(); c.moveTo(lastX,lastY); c.lineTo(x,y); c.stroke();
+      lastX=x; lastY=y; render();
+    }
+
+    function getDocPos(e){
+      const rect = stage.getBoundingClientRect();
+      return { x: (e.clientX-rect.left), y:(e.clientY-rect.top) };
+    }
+
+    // -----------------------------
+    // Move tool (drag layer)
+    // -----------------------------
+    let dragging=false; let dragStart={x:0,y:0}; let layerStart={x:0,y:0};
+    function draggingLayerStart(e){
+      const L=getActive(); if(!L) return; dragging=true; dragStart={x:e.clientX,y:e.clientY}; layerStart={x:L.x,y:L.y};
+    }
+    function draggingMove(e){ const L=getActive(); if(!L) return; L.x = layerStart.x + (e.clientX-dragStart.x); L.y = layerStart.y + (e.clientY-dragStart.y); render(); }
+
+    // -----------------------------
+    // Fill tool (basic flood fill)
+    // -----------------------------
+    function floodFillAt(x,y){
+      const L=getActive(); if(!L||!L.canvas) return; const c=L.canvas.getContext('2d');
+      const img=c.getImageData(0,0,stage.width,stage.height); const data=img.data;
+      const targetIdx=((y|0)*stage.width + (x|0))*4;
+      const tr=data[targetIdx],tg=data[targetIdx+1],tb=data[targetIdx+2],ta=data[targetIdx+3];
+      const tol=32; // tolerance
+      const stack=[[x|0,y|0]]; const visited=new Uint8Array(stage.width*stage.height);
+      const hex=document.getElementById('brushColor').value; const col=hexToRGBA(hex,255);
+      while(stack.length){ const [sx,sy]=stack.pop(); if(sx<0||sy<0||sx>=stage.width||sy>=stage.height) continue; const i=(sy*stage.width+sx); if(visited[i]) continue; visited[i]=1; const j=i*4; const dr=data[j]-tr; const dg=data[j+1]-tg; const db=data[j+2]-tb; const da=data[j+3]-ta; if(Math.abs(dr)+Math.abs(dg)+Math.abs(db)+Math.abs(da) <= tol){ data[j]=col[0]; data[j+1]=col[1]; data[j+2]=col[2]; data[j+3]=255; stack.push([sx+1,sy],[sx-1,sy],[sx,sy+1],[sx,sy-1]); } }
+      c.putImageData(img,0,0); render(); pushHistory();
+    }
+    function hexToRGBA(hex,a=255){ const v=parseInt(hex.slice(1),16); return [(v>>16)&255,(v>>8)&255,v&255,a]; }
+
+    // -----------------------------
+    // Text tool
+    // -----------------------------
+    function addTextAt(x,y){
+      const L=getActive(); if(!L || L.type!=='text'){ const nl=createBaseLayer('text','Text'); addLayer(nl); }
+      const T=getActive(); if(!T) return;
+      const text = document.getElementById('textInput').value || 'Text';
+      T.textProps.text=text; T.x=x; T.y=y; drawTextLayer(T); pushHistory(); render();
+    }
+    function drawTextLayer(L){ const c=L.canvas.getContext('2d'); c.clearRect(0,0,L.canvas.width,L.canvas.height); const tp=L.textProps; c.fillStyle=tp.color; c.font = `${tp.weight} ${tp.size}px ${tp.font}`; c.textBaseline='top'; c.fillText(tp.text, L.x||10, L.y||10); }
+
+    // Text panel bindings
+    document.getElementById('fontSelect').onchange=()=>{ const L=getActive(); if(L && L.type==='text'){ L.textProps.font=fontSelect.value; drawTextLayer(L); render(); pushHistory(); }}
+    document.getElementById('fontSize').oninput=()=>{ const L=getActive(); if(L && L.type==='text'){ L.textProps.size=parseInt(fontSize.value,10); drawTextLayer(L); render(); }}
+    document.getElementById('fontWeight').onchange=()=>{ const L=getActive(); if(L && L.type==='text'){ L.textProps.weight=fontWeight.value; drawTextLayer(L); render(); pushHistory(); }}
+    document.getElementById('textColor').onchange=()=>{ const L=getActive(); if(L && L.type==='text'){ L.textProps.color=textColor.value; drawTextLayer(L); render(); pushHistory(); }}
+
+    // -----------------------------
+    // Adjustments bindings
+    // -----------------------------
+    document.getElementById('layerOpacity').oninput=()=>{ const L=getActive(); if(!L) return; L.opacity=parseFloat(layerOpacity.value); render(); };
+    document.getElementById('blendMode').onchange=()=>{ const L=getActive(); if(!L) return; L.blend=blendMode.value; render(); pushHistory(); };
+    document.getElementById('adjBrightness').oninput=()=>{ const L=getActive(); if(!L) return; L.adjustments.b=parseInt(adjBrightness.value,10); render(); };
+    document.getElementById('adjContrast').oninput=()=>{ const L=getActive(); if(!L) return; L.adjustments.c=parseInt(adjContrast.value,10); render(); };
+    document.getElementById('adjSaturation').oninput=()=>{ const L=getActive(); if(!L) return; L.adjustments.s=parseInt(adjSaturation.value,10); render(); };
+    document.getElementById('adjHue').oninput=()=>{ const L=getActive(); if(!L) return; L.adjustments.h=parseInt(adjHue.value,10); render(); };
+
+    // -----------------------------
+    // Crop tool
+    // -----------------------------
+    let cropDrag=false; let cropStart={x:0,y:0};
+    function startCrop(x,y){ state.cropping={x,y,w:0,h:0}; cropStart={x,y}; cropRect.classList.remove('hidden'); cropDrag=true; updateCrop(x,y); }
+    function updateCrop(x,y){ const r=state.cropping; r.w = x-cropStart.x; r.h = y-cropStart.y; const left=Math.min(cropStart.x,x), top=Math.min(cropStart.y,y); const w=Math.abs(r.w), h=Math.abs(r.h); Object.assign(cropRect.style,{left:left+'px',top:top+'px',width:w+'px',height:h+'px'}); }
+    document.getElementById('applyCrop').onclick=()=>{
+      if(!state.cropping){ return; }
+      const left=parseInt(cropRect.style.left||'0'); const top=parseInt(cropRect.style.top||'0'); const w=parseInt(cropRect.style.width||'0'); const h=parseInt(cropRect.style.height||'0');
+      if(w<=0||h<=0){ cancelCrop(); return; }
+      // Crop each layer canvas + mask
+      state.layers.forEach(L=>{
+        if(L.canvas){ L.canvas = cropCanvas(L.canvas,left,top,w,h); }
+        if(L.maskCanvas){ L.maskCanvas = cropCanvas(L.maskCanvas,left,top,w,h); }
+        L.x=0; L.y=0;
+      });
+      stage.width = w; stage.height = h; stageContainer.style.width=w+'px'; stageContainer.style.height=h+'px'; document.getElementById('docW').value=w; document.getElementById('docH').value=h;
+      cancelCrop(); pushHistory(); render();
+    }
+    document.getElementById('cancelCrop').onclick=cancelCrop;
+    function cancelCrop(){ state.cropping=null; cropRect.classList.add('hidden'); }
+    function cropCanvas(src,left,top,w,h){ const c=document.createElement('canvas'); c.width=w; c.height=h; c.getContext('2d').drawImage(src, left, top, w, h, 0, 0, w, h); return c; }
+
+    // -----------------------------
+    // Zoom tool (click to zoom in, Alt-click to zoom out)
+    // -----------------------------
+    function zoomAt(e, pos){ const factor = e.altKey? (1/1.2) : 1.2; state.zoom*=factor; stage.style.transform = `scale(${state.zoom})`; stageContainer.style.transformOrigin = '0 0'; }
+
+    // -----------------------------
+    // Document controls
+    // -----------------------------
+    document.getElementById('resizeDoc').onclick=()=>{ const w=parseInt(docW.value,10)||390; const h=parseInt(docH.value,10)||844; resizeDocument(w,h); };
+    function resizeDocument(w,h){
+      // Resize each layer canvas
+      state.layers.forEach(L=>{
+        if(L.canvas){ const old=L.canvas; const c=document.createElement('canvas'); c.width=w; c.height=h; c.getContext('2d').drawImage(old,0,0,w,h); L.canvas=c; }
+        if(L.maskCanvas){ const old=L.maskCanvas; const c=document.createElement('canvas'); c.width=w; c.height=h; c.getContext('2d').drawImage(old,0,0,w,h); L.maskCanvas=c; }
+      });
+      stage.width=w; stage.height=h; stageContainer.style.width=w+'px'; stageContainer.style.height=h+'px'; render(); pushHistory();
+    }
+
+    document.getElementById('newDoc').onclick=()=>{ if(confirm('Clear current document?')){ state.layers=[]; state.activeLayerId=null; stage.width=390; stage.height=844; stageContainer.style.width='390px'; stageContainer.style.height='844px'; refreshLayersUI(); render(); pushHistory(); } };
+
+    // -----------------------------
+    // Export PNG
+    // -----------------------------
+    document.getElementById('exportBtn').onclick=()=>{
+      // Render final composition to an offscreen canvas to ensure masks and filters have been applied already in render()
+      // We can simply use stage as it is the composition output
+      const url = stage.toDataURL('image/png');
+      const a=document.createElement('a'); a.href=url; a.download='image.png'; a.click();
+    };
+
+    // -----------------------------
+    // Undo/Redo
+    // -----------------------------
+    document.getElementById('undoBtn').onclick=undo; document.getElementById('redoBtn').onclick=redo;
+
+    // -----------------------------
+    // Add layers buttons
+    // -----------------------------
+    document.getElementById('addPaintLayer').onclick=()=>addLayer(createBaseLayer('paint','Paint'));
+    document.getElementById('addTextLayer').onclick=()=>addLayer(createBaseLayer('text','Text'));
+
+    // -----------------------------
+    // AI Background Removal (U2Net via onnxruntime-web)
+    // -----------------------------
+    document.getElementById('bgRemoveBtn').onclick = async ()=>{
+      const L = getActive(); if(!L){ alert('Select a layer first.'); return; }
+      if(!L.canvas){ alert('Active layer has no pixels.'); return; }
+      try{
+        document.getElementById('bgRemoveBtn').disabled = true; document.getElementById('bgRemoveBtn').textContent='Removing…';
+        const modelUrl = document.getElementById('modelSelect').value;
+        const session = await ort.InferenceSession.create(modelUrl, { executionProviders: ['wasm'] });
+        // Prepare input: 1x3x320x320 float32 in [0,1]
+        const input = preprocessU2Net(L.canvas);
+        const feeds = { 'input': input.tensor }; // many U2Net ONNX exports use 'input' as name; we'll try a fallback below if it fails
+        let results;
+        try{ results = await session.run(feeds); }
+        catch(err){ // fallback common name
+          const altFeeds = {}; altFeeds[ session.inputNames[0] ] = input.tensor; results = await session.run(altFeeds);
+        }
+        const firstOutName = session.outputNames[0];
+        const out = results[firstOutName]; // 1x1x320x320
+        const mask = postprocessMask(out, input.meta);
+        // Create/replace mask canvas on layer
+        L.maskCanvas = mask;
+        render(); pushHistory();
+      }catch(err){ console.error(err); alert('Background removal failed. Try a different model URL.'); }
+      finally{ document.getElementById('bgRemoveBtn').disabled=false; document.getElementById('bgRemoveBtn').textContent='Remove BG'; }
+    };
+
+    function preprocessU2Net(srcCanvas){
+      const size=320; const tmp=document.createElement('canvas'); tmp.width=size; tmp.height=size; const t=tmp.getContext('2d');
+      // Fit src to square with letterboxing
+      const scale=Math.min(size/srcCanvas.width, size/srcCanvas.height);
+      const w=srcCanvas.width*scale, h=srcCanvas.height*scale; const x=(size-w)/2, y=(size-h)/2;
+      t.fillStyle='#000'; t.fillRect(0,0,size,size);
+      t.drawImage(srcCanvas, x,y,w,h);
+      const img=t.getImageData(0,0,size,size).data;
+      const data=new Float32Array(1*3*size*size);
+      // Normalize to [0,1], CHW
+      let p=0; // c-major
+      const R=new Float32Array(size*size), G=new Float32Array(size*size), B=new Float32Array(size*size);
+      for(let i=0,j=0;i<img.length;i+=4,j++){
+        R[j]=img[i]/255; G[j]=img[i+1]/255; B[j]=img[i+2]/255;
+      }
+      // channel-first
+      data.set(R,0);
+      data.set(G,size*size);
+      data.set(B,2*size*size);
+      const tensor = new ort.Tensor('float32', data, [1,3,size,size]);
+      return { tensor, meta:{ scale, x, y, w, h, size } };
+    }
+
+    function postprocessMask(out, meta){
+      // out: Float32Array of 1x1x320x320 predicted matte (usually 0..1)
+      const size = meta.size; const arr = out.data || out;
+      const mask320 = new Float32Array(size*size);
+      // Some models output already squeezed
+      if(arr.length===size*size){ mask320.set(arr); }
+      else if(arr.length===1*1*size*size){ mask320.set(arr); }
+      else { // worst case: read first plane
+        for(let i=0;i<size*size;i++) mask320[i]=arr[i];
+      }
+      // Upscale back to document size and unletterbox mapping
+      const maskCanvas=document.createElement('canvas'); maskCanvas.width=stage.width; maskCanvas.height=stage.height; const mctx=maskCanvas.getContext('2d');
+      const small=document.createElement('canvas'); small.width=size; small.height=size; const sctx=small.getContext('2d');
+      // Put grayscale to small
+      const imgData = sctx.createImageData(size,size);
+      for(let i=0;i<size*size;i++){
+        const v = Math.max(0, Math.min(1, mask320[i]));
+        const g = (v*255)|0; const j=i*4; imgData.data[j]=g; imgData.data[j+1]=g; imgData.data[j+2]=g; imgData.data[j+3]=255;
+      }
+      sctx.putImageData(imgData,0,0);
+      // Draw small onto doc-scale via the same letterbox mapping used in preprocess
+      // Start with a fully transparent mask, then draw the resized matte into the fitted area
+      mctx.fillStyle='black'; mctx.fillRect(0,0,maskCanvas.width,maskCanvas.height);
+      const scale=Math.min(size/stage.width, size/stage.height);
+      // Actually we saved meta.scale, x,y mapping in the square. We inverse-map now:
+      const w = meta.w / meta.scale; const h = meta.h / meta.scale; // equals size ideally
+      const dx = (stage.width - (stage.width)) / 2; // 0
+      const dy = (stage.height - (stage.height)) / 2; // 0
+      // Draw fitted region
+      mctx.drawImage(small, meta.x, meta.y, meta.w, meta.h, 0, 0, stage.width, stage.height);
+      return maskCanvas;
+    }
+
+    // -----------------------------
+    // Init
+    // -----------------------------
+    addLayer(createBaseLayer('paint','Background Paint'));
+    pushHistory(); render();
+  </script>
+</body>
+</html>
